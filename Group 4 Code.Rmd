@@ -1,0 +1,475 @@
+---
+title: "Box Office Revenue Predicting (Group 4 Code)"
+output: html_document
+date: "2024-07-27"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+library(tidyverse)
+library(dplyr)
+library(stringr)
+library(ggcorrplot)
+library(caret)
+library(randomForest)
+library(VIM)
+library(car)
+library(corrplot)
+library(GGally)
+
+```
+
+## Exploratory Data Analysis
+
+### Understanding the Data
+
+```{r}
+# Data Preview
+dim(office)
+glimpse(office)
+view(office)
+
+# Structure
+str(office)
+
+# Summary 
+summary(office)
+```
+
+### Data Cleaning
+
+```{r}
+############################# FILE IMPORT WITH NAs #################################################
+
+office <- read.csv('/Users/mallikasingh/Documents/UT Austin/McCombs MSBA/Summer 2024/Intro to ML/tmdb-box-office-prediction/real_box_data.csv', na.strings=c("", '#N/A', '[]', '0'))
+
+head(office)
+
+############################# LOGGING REVENUE FOR SKEW #################################################
+office$log_revenue <- log(office$revenue)
+
+office$log_budget <- log(office$budget)
+mean_log_budget <- mean(office$log_budget, na.rm = TRUE)
+office$log_budget[is.na(office$log_budget)] <- mean_log_budget
+
+
+############################## COLUMN CLEANING #################################################
+# belongs_to_collection becomes collection_name
+office <- office %>%
+  mutate(
+    collection_name = ifelse(
+      !is.na(belongs_to_collection) & belongs_to_collection != "",
+      str_extract(belongs_to_collection, "(?<=name\\'\\:\\s{1}\\').+(?=\\'\\,\\s{1}\\'poster)"),
+      NA
+    ),
+    # spoken_languages becomes language
+    language = ifelse(
+      !is.na(spoken_languages) & spoken_languages != "",
+      str_extract(spoken_languages, "(?<=iso_639_1\\'\\:\\s{1}\\')[a-z]{2}"),
+      NA
+    ),
+    # genres becomes mgenre
+    mgenre = ifelse(
+      !is.na(genres) & genres != "",
+      str_extract(genres, "(?<=name\\'\\:\\s{1}\\')[^']+"),
+      NA
+    ),
+    # cast becomes main_cast
+    main_cast = ifelse(
+      !is.na(cast) & cast != "",
+      str_extract(cast, "(?<=name\\'\\:\\s{1}\\')[^']+"),
+      NA
+    ),
+    # production_countries becomes prod_country_code
+    prod_country_code = ifelse(
+      !is.na(production_countries) & production_countries != "",
+      str_extract(production_countries, "(?<=iso_3166_1\\'\\:\\s{1}\\')[A-Z]{2}"),
+      NA
+    ),
+    # production_companies becomes prod_company
+    prod_company = ifelse(
+      !is.na(production_companies) & production_companies != "",
+      str_extract(production_companies, "(?<=name\\'\\:\\s{1}\\')[^']+"),
+      NA
+    )
+  ) 
+
+office <- office %>%
+  mutate(
+    # Extract the first director entry including the name
+    director_entry = str_extract(crew, "\\{[^}]*'department':\\s*'Directing'[^}]*'job':\\s*'Director'[^}]*'name':\\s*'[^']+'"),
+    # Extract the name from the director entry
+    director_name = str_extract(director_entry, "'name':\\s*'[^']+'") %>%
+      str_remove_all("'name':\\s*'") %>%
+      str_remove_all("'")
+  )
+
+```
+
+### Quantitative and Categorical Data Visualization
+
+```{r}
+# Analysis of individual columns - Budget, Popularity, Runtime and Revenue
+hist(office$budget, main = "Budget Distribution", xlab = "Budget", col = "blue")
+hist(office$revenue, main = "Revenue Distribution", xlab = "Revenue", col = "green")
+hist(office$popularity, main = "Popularity Distribution", xlab = "Popularity", col = "red" )
+
+# Analysis of Budget vs Revenue, Runtime vs Revenue and Popularity vs Revenue
+
+# Range Definition
+revenue_range <- c(1, 1519557910)
+popularity_range <- c(0.000001, 294.337037)
+
+# Revenue Breaks and Labels
+revenue_breaks <- c(0, 500000000, 1000000000, 1500000000)
+revenue_labels <- c('$0', '$500', '$1000', '$1500')
+
+# Budget vs Revenue
+ggplot(office, aes(x = budget, y = revenue, color = budget)) +
+  geom_point(color = "blue") +
+  geom_smooth(method = 'lm', color = 'red3', fill = 'red3') +
+  scale_y_continuous(breaks = revenue_breaks, labels = revenue_labels) +
+  theme_classic() +
+  theme(legend.position = 'none') +
+  labs(title = 'Revenue by Budget', x = 'Budget', y = 'Revenue')
+
+# Popularity vs Revenue
+ggplot(office, aes(x = runtime, y = revenue, color = runtime)) +
+  geom_point(color = "green") +
+  geom_smooth(method = 'lm', color = 'red3', fill = 'red3') +
+  scale_y_continuous(breaks = revenue_breaks, labels = revenue_labels) +
+  theme_classic() +
+  theme(legend.position = 'none') +
+  labs(title = 'Revenue by Runtime', x = 'Runtime', y = 'Revenue')
+
+# Runtime vs Revenue
+ggplot(office, aes(x = popularity, y = revenue, color = popularity)) +
+  geom_point(color = "purple") +
+  geom_smooth(method = 'lm', color = 'red3', fill = 'red3') +
+  scale_y_continuous(breaks = revenue_breaks, labels = revenue_labels) +
+  theme_classic() +
+  theme(legend.position = 'none') +
+  labs(title = 'Revenue by Popularity', x = 'Popularity', y = 'Revenue')
+
+# Feature Extraction plot
+ggpairs(office[, c("budget", "popularity", "runtime", "revenue")])
+
+# PRINCIPAL COMPONENT ANALYSIS
+
+# Numeric columns for PCA
+numeric_columns <- office %>% select(budget, popularity, runtime, revenue)
+
+numeric_columns <- na.omit(numeric_columns)
+
+# Standardize the data, such that each variable has a mean of 0 and a standard deviation of 1.
+# Standardization ensures that each variable contributes equally to the analysis, as PCA is sensitive to the scale of data
+numeric_columns_scaled <- scale(numeric_columns)
+
+# Apply PCA
+pca_result <- prcomp(numeric_columns_scaled, center = TRUE, scale. = TRUE)
+
+# Summary and plot
+summary(pca_result)
+plot(pca_result, type = "lines")
+
+```
+
+### Feature Engineering and Extraction
+
+```{r}
+####################### LEVELING COLUMNS ######################################
+director_counts <- office %>%
+  count(director_name) %>%
+  arrange(desc(n))
+# Get the top 10 most frequent production companies
+top_10_directors <- director_counts %>%
+  top_n(10, n) %>%
+  pull(director_name)
+# Update the dataset to replace all other companies with "Other"
+office <- office %>%
+  mutate(director_name = if_else(director_name %in% top_10_directors, 
+                                director_name, 
+                                "Other"))
+
+# Leveling prod_country_count
+prod_country_code_count <- office %>%
+  count(prod_country_code) %>%
+  arrange(desc(n))
+# Get the top 10 most frequent production countries
+top_10_prod_country_code <- prod_country_code_count %>%
+  top_n(10, n) %>%
+  pull(prod_country_code)
+# Update the dataset to replace all other countries with "Other"
+office <- office %>%
+  mutate(prod_country_code = if_else(prod_country_code %in% top_10_prod_country_code, 
+                                     prod_country_code, 
+                                     "Other"))
+
+#leveling genre and creating other category 
+genre_counts <- office %>%
+  count(mgenre) %>%
+  arrange(desc(n))
+genre_counts
+# Everything under 50 dump into other category
+genres_to_replace <- genre_counts %>%
+  filter(n < 50) %>%
+  pull(mgenre)
+# mutate mgenre
+office <- office %>%
+  mutate(mgenre = ifelse(mgenre %in% genres_to_replace, "Other", mgenre))
+
+# Language Leveling
+language_count <- office %>%
+  count(language) %>%
+  arrange(desc(n))
+# Get the top 10 most frequent languages
+top_10_language <- language_count %>%
+  top_n(10, n) %>%
+  pull(language)
+# Update the dataset to replace all other languages with "Other"
+office <- office %>%
+  mutate(language_level = if_else(language %in% top_10_language, 
+                            language, 
+                            "Other"))
+
+# Prod_company leveling
+company_counts <- office %>%
+  count(prod_company) %>%
+  arrange(desc(n))
+# Get the top 10 most frequent production companies
+top_10_companies <- company_counts %>%
+  top_n(10, n) %>%
+  pull(prod_company)
+# Update the dataset to replace all other companies with "Other"
+office <- office %>%
+  mutate(prod_company = if_else(prod_company %in% top_10_companies, 
+                                prod_company, 
+                                "Other"))
+
+# Fixing Date and extracting year, month, day from column
+office$release_date <- as.Date(office$release_date, format = "%m/%d/%y")
+fix_date <- function(x, year=1930){
+  m <- year(x) %% 100
+  year(x) <- ifelse(m > year %% 100, 1900+m, 2000+m)
+  x
+}
+office$release_date <- fix_date(office$release_date, 1930)
+office <- office[office$release_date <= as.Date("2019-12-31"), ]
+
+office$rls_year <- as.numeric(year(office$release_date))
+office$rls_month <- month(office$release_date)
+office$rls_day_of_week <- wday(office$release_date, label = TRUE)  # Label as day names
+
+# Create Season column
+office$season <- case_when(
+  office$rls_month %in% c(12, 1, 2) ~ "Winter",
+  office$rls_month %in% c(3, 4, 5) ~ "Spring",
+  office$rls_month %in% c(6, 7, 8) ~ "Summer",
+  office$rls_month %in% c(9, 10, 11) ~ "Fall"
+)
+
+# Create decade column
+office$decade <- cut(office$rls_year,
+                 breaks = seq(1930, 2030, by = 10),
+                 labels = paste0(seq(1930, 2020, by = 10), "s"),
+                 right = FALSE)
+
+# Categorizing Runtime and Popularity
+office$runtime_category <- cut(office$runtime,
+                               breaks = c(0, 90, 120, Inf),
+                               labels = c("Short", "Medium", "Long"))
+
+office$popularity_category <- cut(office$popularity,
+                                     breaks = c(0, 4.018, 7.375, 10.891, 294.337),
+                                     labels = c("Very Low", "Low", "Medium", "High"))
+
+# Extracting numbers and genders of cast and crew columns
+
+office$num_cast <- str_count(office$cast, "\\{[^\\{]*\\}")
+office$num_crew <- str_count(office$crew, "\\{[^\\{]*\\}")
+
+# Cast counts
+office$unknowngender_cast <- integer(nrow(office))
+office$female_cast <- integer(nrow(office))
+office$male_cast <- integer(nrow(office))
+
+#create loop to count values and fill in the columns created above 
+for (i in seq_len(nrow(office))) {
+  cast <- office$cast[i]
+  
+  #count number of values with each of the 3 gender values 
+  office$unknowngender_cast[i] <- length(str_extract_all(cast, "'gender': 0")[[1]])
+  office$female_cast[i] <- length(str_extract_all(cast, "'gender': 1")[[1]])
+  office$male_cast[i] <- length(str_extract_all(cast, "'gender': 2")[[1]])
+}
+
+# Cast counts
+office$unknowngender_crew <- integer(nrow(office))
+office$female_crew <- integer(nrow(office))
+office$male_crew <- integer(nrow(office))
+
+#create loop to count values and fill in the columns created above 
+for (i in seq_len(nrow(office))) {
+  crew <- office$crew[i]
+  
+  #count number of values with each of the 3 gender values 
+  office$unknowngender_crew[i] <- length(str_extract_all(crew, "'gender': 0")[[1]])
+  office$female_crew[i] <- length(str_extract_all(crew, "'gender': 1")[[1]])
+  office$male_crew[i] <- length(str_extract_all(crew, "'gender': 2")[[1]])
+}
+
+
+
+# Create boolean values for collection, homepage and language 
+office$collection_bool <- with(office, ifelse(!is.na(office$collection_name), TRUE, FALSE))
+office$homepage_bool <- with(office, ifelse(!is.na(office$homepage), TRUE, FALSE))
+office$language_bool <- with(office, ifelse(office$language == 'en', 'en', 'not_en'))
+
+#################################### FINAL DROPPING #########################################
+# Drop old columns
+office <- office %>% select(-all_of(c("belongs_to_collection", "collection_name", "genres", "production_companies", "production_countries", "spoken_languages", "homepage", "cast", "original_language", "Keywords", "tagline", "director_entry", "crew")))
+
+# Drop rows with NA values (not budget)
+office <- office[complete.cases(office[, c("mgenre", "prod_country_code", "language", "main_cast", "poster_path", "prod_company", "overview", "runtime", "director_name", "num_cast", "num_crew", "unknowngender_cast", "male_cast",
+                                           "female_cast", "unknowngender_crew", "male_crew", "female_crew")]), ]
+
+# Budget to Runtime Ratio, needs to be done after dropping the NAs above
+mean_budget <- mean(office$budget, na.rm = TRUE)
+office$budget[is.na(office$budget)] <- mean_budget
+office$budget_runtime_ratio <- office$budget / office$runtime
+
+
+office <- office %>%
+  mutate(across(c(prod_company, prod_country_code, language_bool, mgenre, season, director_name, 
+                  rls_day_of_week, decade, runtime_category, popularity_category), as.factor))
+
+head(office)
+```
+
+### Multiple Linear Regression
+
+```{r}
+# Load necessary library
+library(caret)
+
+# Replace 'office' with your actual data
+data <- office  
+
+# Set seed for reproducibility
+set.seed(123)
+
+# Split the data
+train <- createDataPartition(office$log_revenue, p = 0.80, list = FALSE)
+rev_train <- office[train, ]
+rev_test <- office[-train, ]
+
+
+# Fit the model using training data
+revenue_model <- lm(log_revenue ~ director_name + prod_country_code + mgenre + language_bool +
+                      release_date + rls_month + rls_year + rls_day_of_week + 
+                      runtime_category + popularity_category + 
+                      num_cast + num_crew + unknowngender_cast + male_cast +  
+                      female_cast + unknowngender_crew + male_crew + female_crew + 
+                      collection_bool + homepage_bool + log_budget +
+                      popularity + runtime + prod_company + season + budget, data = rev_train)
+
+summary(revenue_model)
+confint(revenue_model)
+
+predictions_train <- predict(revenue_model, newdata = rev_train)
+
+# Compute MSE for the training set
+mse_train <- mean((rev_train$log_revenue - predictions_train)^2)
+mse_train
+
+rmse_train <- sqrt(mse_train)
+rmse_train
+
+# Make predictions on test data
+y_predictors <- predict(revenue_model, rev_test)
+
+# Get actual values from test data
+y_actual <- rev_test$log_revenue
+
+# Undo log transformation by exponentiating the values
+y_pred_exp <- exp(y_predictors)
+y_actual_exp <- exp(y_actual)
+
+mse1 <- mean((y_actual - y_predictors)^2)
+mse1
+
+rsme <- sqrt(mse1)
+rsme
+
+# Calculate MSE on the original scale
+mse2 <- mean((y_actual_exp - y_pred_exp)^2)
+mse2
+
+# solution <- data.frame(id = office[0:556,]$id, revenue = y_pred_exp)
+
+# head(solution)
+
+```
+
+```{r}
+bud <- lm(formula = log_revenue ~ budget, data = office)
+
+summary(bud)
+
+plot(office$budget, office$revenue)
+abline(lm(office$budget ~ office$revenue))
+
+model_summ <- summary(bud)
+
+mean(model_summ$residuals^2)
+```
+
+## Multiple Linear Regression Plots
+
+```{r}
+plot(y_actual, y_predictors, 
+     main = "Predicted vs Actual Values",
+     xlab = "Actual Values (log_revenue))",
+     ylab = "Predicted Values (log_revenue)")
+abline(0, 1, col = "red")
+
+hist(residuals(revenue_model), 
+     main = "Histogram of Residuals",
+     xlab = "Residuals")
+
+model_summary <- summary(revenue_model)
+t_values <- abs(model_summary$coefficients[, "t value"])
+variable_names <- rownames(model_summary$coefficients)
+importance_df <- data.frame(Variable = variable_names, Importance = t_values)
+
+# Remove intercept from importance
+importance_df <- importance_df[importance_df$Variable != "(Intercept)", ]
+
+# Plot variable importance using ggplot2
+library(ggplot2)
+
+p <- ggplot(importance_df, aes(x = reorder(Variable, Importance), y = Importance)) +
+    geom_bar(stat = "identity", fill = "steelblue") +
+    coord_flip() +
+    labs(title = "Variable Importance", x = "Variables", y = "Importance (Absolute t-value)") +
+    theme_minimal()
+
+print(p)
+
+library(corrplot)
+corr_matrix <- cor(rev_train[, sapply(rev_train, is.numeric)])
+corrplot(corr_matrix, method = "circle")
+
+# Plotting relationship between revenue and genre
+ggplot(data=office, mapping = aes(x = mgenre, y = revenue)) + 
+  geom_boxplot() +
+  theme_bw()
+
+# Language and Revenue
+ggplot(data=office, mapping = aes(x = language_bool, y = revenue)) + 
+  geom_boxplot() +
+  theme_bw()
+```
+
+Note that the `echo = FALSE` parameter was added to the code chunk to prevent printing of the R code that generated the plot.
